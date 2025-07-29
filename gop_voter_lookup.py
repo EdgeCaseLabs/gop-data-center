@@ -114,23 +114,16 @@ class GOPVoterLookup:
         
     @staticmethod
     def _check_and_install_browsers():
-        """Check if Playwright browsers are installed and install if needed"""
+        """Ensure Playwright browsers are available"""
+        print("Checking if Playwright browsers are available...")
         try:
-            # Check if chromium is installed by trying to get its path
-            from playwright.sync_api import sync_playwright
-            with sync_playwright() as p:
-                p.chromium.executable_path
-        except Exception:
-            print("Installing Playwright browsers (this only happens once)...")
-            try:
-                # Run playwright install command
-                subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], 
-                             check=True, capture_output=True, text=True)
-                print("✓ Playwright browsers installed successfully")
-            except subprocess.CalledProcessError as e:
-                print(f"✗ Failed to install Playwright browsers: {e}")
-                print("Please run manually: uv run playwright install chromium")
-                sys.exit(1)
+            # Always run install - Playwright will skip if already installed
+            subprocess.run([sys.executable, "-m", "playwright", "install", "chromium"], 
+                         check=True, capture_output=True, text=True)
+        except subprocess.CalledProcessError as e:
+            print(f"✗ Failed to install Playwright browsers: {e}")
+            print("Please run manually: uv run playwright install chromium")
+            sys.exit(1)
         
     async def _authenticate(self, page: Page, username: str, password: str) -> bool:
         """Authenticate with the GOP Data Center"""
