@@ -21,22 +21,13 @@ Automated voter lookup script for the GOP Data Center website using Playwright b
 curl -LsSf https://astral.sh/uv/install.sh | sh
 ```
 
-2. Clone this repository and make the script executable:
+2. Clone this repository
 ```bash
 git clone <repository-url>
 cd gop-data-center
-chmod +x gop_voter_lookup.py
 ```
 
 That's it! The script will automatically install dependencies and browsers when you run it.
-
-### Traditional Installation
-
-1. Clone this repository
-2. Install dependencies:
-```bash
-pip install -r requirements.txt
-```
 
 
 ## Usage
@@ -57,11 +48,6 @@ uv run gop_voter_lookup.py "John Doe"
 Search for multiple voters:
 ```bash
 ./gop_voter_lookup.py "John Doe" "Jane Smith" "Robert Johnson"
-```
-
-#### Traditional Method
-```bash
-python gop_voter_lookup.py "John Doe"
 ```
 
 ### First Run
@@ -180,4 +166,4 @@ Result 1:
 
 ## License
 
-This script is for authorized use only. Ensure you have permission to access the GOP Data Center.
+This script is for authorized use only. Ensure you have permission to access the GOP Data Center and follow the terms of usage.
