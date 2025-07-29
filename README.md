@@ -11,6 +11,8 @@ Automated voter lookup script for the GOP Data Center website using Playwright b
 - Runs headless by default (no browser window)
 - Debug mode for troubleshooting with visible browser
 - Search filters (address, city, zip, phone, voter ID)
+- Optional detailed voter information extraction from individual voter pages
+- Direct links to voter detail pages for manual browsing
 
 ## Installation
 
@@ -81,16 +83,30 @@ All examples below work with both `./gop_voter_lookup.py` (uv) or `python gop_vo
 # Search with filters
 ./gop_voter_lookup.py "John Doe" --city Houston --zip 77001
 
+# Extract detailed voter information (slower but more comprehensive)
+./gop_voter_lookup.py "John Doe" --extract-details
+
+# Combine detailed extraction with other options
+./gop_voter_lookup.py "John Doe" --extract-details --export json --output detailed_results.json
+
 # Delete stored credentials
 ./gop_voter_lookup.py --delete-credentials
 ```
 
-### Available Filters
+### Available Options
+
+#### Search Filters
 - `--address`: Filter by address
 - `--city`: Filter by city
 - `--zip`: Filter by zip code
 - `--phone`: Filter by phone number
 - `--voter-id`: Filter by voter ID
+
+#### Additional Options
+- `--extract-details`: Extract comprehensive voter information from individual detail pages (slower)
+- `--debug`: Show browser window and detailed debugging information
+- `--export`: Export results to JSON or CSV format
+- `--output`: Specify output filename for exports
 
 ## Security
 
@@ -117,7 +133,57 @@ Result 1:
   phone: (713)555-1234
   date_of_birth: 05/15/1965
   calculated_party: 2 - Soft Republican
+  📄 View Full Details: https://www.gopdatacenter.com/rnc/RecordLookup/RecordMaintenance.aspx?id=12345
 ```
+
+The "📄 View Full Details" link provides direct access to the voter's complete profile page on the GOP Data Center, allowing you to manually browse additional information or verify the automated extraction results.
+
+### Detailed Information (--extract-details)
+When using the `--extract-details` flag, the script extracts comprehensive information from individual voter detail pages:
+
+```
+=== Results for John Doe ===
+
+Result 1:
+  name: DOE, JOHN M.
+  address: 123 Main St
+  city: Houston
+  state: TX
+  zip_code: 77001
+  phone: (713)555-1234
+  date_of_birth: 05/15/1965
+  calculated_party: 2 - Soft Republican
+
+  --- Detailed Information ---
+
+  Personal:
+    first_name: JOHN
+    middle_name: M
+    last_name: DOE
+    gender: M
+    birthday: 05/15/1965
+    age: 58
+
+  Contact:
+    email: john.doe@example.com
+    home_phone: (713)555-1234
+    work_phone: (713)555-5678
+    cell_phone: (713)555-9999
+
+  Voter Info:
+    voter_id: TX1234567890
+    registration_date: 01/15/1990
+    party_affiliation: Republican
+    voter_status: Active
+    precinct: 123
+
+  Districts:
+    district_congress: 7
+    district_state_house: 134
+    district_state_senate: 11
+```
+
+**Note:** Detailed extraction is significantly slower as it must visit each voter's individual detail page.
 
 ### JSON Export
 ```json
