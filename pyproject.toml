@@ -1,0 +1,24 @@
+[project]
+name = "gop-voter-lookup"
+version = "1.0.0"
+description = "Automated voter lookup for GOP Data Center"
+requires-python = ">=3.8"
+dependencies = [
+    "playwright>=1.40.0",
+    "cryptography>=41.0.7",
+    "python-dotenv>=1.0.0",
+    "pydantic>=2.5.3",
+]
+
+[project.scripts]
+gop-voter-lookup = "gop_voter_lookup:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.uv]
+dev-dependencies = []
+
+[tool.hatch.metadata]
+allow-direct-references = true
