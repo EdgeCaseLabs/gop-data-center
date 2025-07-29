@@ -2,6 +2,9 @@
 .credentials
 .key
 .env
+credentials.json
+token.json
+service-account.json
 
 # Python
 __pycache__/

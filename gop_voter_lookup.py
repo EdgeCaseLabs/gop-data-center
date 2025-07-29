@@ -21,6 +21,11 @@ from playwright._impl._errors import Error as PlaywrightError
 from cryptography.fernet import Fernet
 from dotenv import load_dotenv
 from pydantic import BaseModel, Field
+from googleapiclient.discovery import build
+from google.auth.transport.requests import Request
+from google.oauth2.credentials import Credentials
+from google.oauth2.service_account import Credentials as ServiceAccountCredentials
+from google_auth_oauthlib.flow import InstalledAppFlow
 
 
 @dataclass
@@ -116,6 +121,320 @@ class DetailedVoterRecord:
     # Notes
     notes: Optional[List[str]] = None
     
+
+class GoogleSheetsManager:
+    """Manages Google Sheets integration for bulk voter lookup"""
+    
+    SCOPES = ['https://www.googleapis.com/auth/spreadsheets']
+    
+    def __init__(self, project_dir: Path, debug: bool = False):
+        self.project_dir = project_dir
+        self.debug = debug
+        self.token_file = project_dir / "token.json"
+        self.credentials_file = project_dir / "credentials.json"
+        self.service = None
+        
+    def authenticate(self):
+        """Authenticate with Google Sheets API"""
+        creds = None
+        
+        # First, try Service Account authentication (recommended for local use)
+        service_account_file = self.project_dir / "service-account.json"
+        if service_account_file.exists():
+            if self.debug:
+                print(f"🔑 Using Service Account authentication: {service_account_file}")
+            try:
+                creds = ServiceAccountCredentials.from_service_account_file(
+                    str(service_account_file), 
+                    scopes=self.SCOPES
+                )
+                self.service = build('sheets', 'v4', credentials=creds)
+                if self.debug:
+                    print("✅ Service Account authentication successful")
+                return True
+            except Exception as e:
+                print(f"❌ Service Account authentication failed: {e}")
+                print("   Falling back to OAuth authentication...")
+        
+        # Fallback to OAuth authentication
+        # Load existing token
+        if self.token_file.exists():
+            creds = Credentials.from_authorized_user_file(str(self.token_file), self.SCOPES)
+            
+        # If no valid credentials, get new ones
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                try:
+                    creds.refresh(Request())
+                except Exception as e:
+                    if self.debug:
+                        print(f"Token refresh failed: {e}")
+                    print("⚠️  Token refresh failed, need to re-authenticate")
+                    # Remove invalid token to force re-auth
+                    if self.token_file.exists():
+                        self.token_file.unlink()
+                    creds = None
+            else:
+                if not self.credentials_file.exists():
+                    print("\n❌ Google API credentials not found!")
+                    print("\n🔧 Recommended: Set up Service Account (easier for local use):")
+                    print("   1. Visit: https://console.cloud.google.com/")
+                    print("   2. Create a project (or select existing)")
+                    print("   3. Enable Google Sheets API:")
+                    print("      https://console.cloud.google.com/apis/library/sheets.googleapis.com")
+                    print("   4. Go to Credentials:")
+                    print("      https://console.cloud.google.com/apis/credentials")
+                    print("   5. Click '+ CREATE CREDENTIALS' → 'Service account'")
+                    print("   6. Fill in service account details")
+                    print("   7. Click 'CREATE AND CONTINUE' → Skip roles → 'DONE'")
+                    print("   8. Click on the created service account")
+                    print("   9. Go to 'Keys' tab → 'ADD KEY' → 'Create new key' → JSON")
+                    print("   10. Download JSON file and save it as:")
+                    print(f"       {service_account_file}")
+                    print("   11. Share your Google Sheet with the service account email from the JSON")
+                    print("\n🔧 Alternative: OAuth Setup (requires consent screen):")
+                    print("   • Create OAuth 2.0 Client ID instead")
+                    print("   • Download as credentials.json")
+                    print(f"   • File should start with: {{\"installed\":{{...}}")
+                    return False
+                    
+                try:
+                    flow = InstalledAppFlow.from_client_secrets_file(
+                        str(self.credentials_file), self.SCOPES)
+                    print("\n🔐 Opening browser for Google authentication...")
+                    print("   If browser doesn't open, copy the URL from the terminal")
+                    creds = flow.run_local_server(port=0)
+                    print("✅ Authentication successful!")
+                except Exception as e:
+                    print(f"\n❌ Authentication failed: {e}")
+                    print("   Please check your credentials.json file format")
+                    return False
+                
+            # Save credentials for next run
+            try:
+                with open(self.token_file, 'w') as token:
+                    token.write(creds.to_json())
+                if self.debug:
+                    print(f"✅ Saved token to {self.token_file}")
+            except Exception as e:
+                if self.debug:
+                    print(f"⚠️  Could not save token: {e}")
+                
+        try:
+            self.service = build('sheets', 'v4', credentials=creds)
+            if self.debug:
+                print("✅ Google Sheets service initialized")
+            return True
+        except Exception as e:
+            print(f"❌ Failed to initialize Google Sheets service: {e}")
+            return False
+        
+    def list_spreadsheets(self):
+        """List available spreadsheets (requires Drive API - simplified for now)"""
+        # For now, user needs to provide spreadsheet ID directly
+        # Could be enhanced to list spreadsheets with Drive API
+        pass
+        
+    def get_spreadsheet_info(self, spreadsheet_id: str):
+        """Get information about a spreadsheet"""
+        try:
+            sheet = self.service.spreadsheets().get(spreadsheetId=spreadsheet_id).execute()
+            return {
+                'title': sheet.get('properties', {}).get('title', 'Unknown'),
+                'sheets': [s['properties']['title'] for s in sheet.get('sheets', [])]
+            }
+        except Exception as e:
+            if self.debug:
+                print(f"Error getting spreadsheet info: {e}")
+            return None
+            
+    def read_column(self, spreadsheet_id: str, sheet_name: str, column: str, start_row: int = 2, row_limit: int = None):
+        """Read names from a specific column, returning names and their row numbers"""
+        try:
+            # Convert column letter to range (e.g., 'A' -> 'A2:A')
+            range_name = f"{sheet_name}!{column}{start_row}:{column}"
+            
+            result = self.service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=range_name
+            ).execute()
+            
+            values = result.get('values', [])
+            
+            # Process rows and track valid entries with their row numbers
+            valid_entries = []
+            processed_count = 0
+            
+            for i, row in enumerate(values):
+                actual_row_num = start_row + i
+                
+                # Skip empty rows
+                if not row or not row[0] or not row[0].strip():
+                    if self.debug:
+                        print(f"  Skipping empty row {actual_row_num}")
+                    continue
+                
+                name = row[0].strip()
+                valid_entries.append({
+                    'name': name,
+                    'row': actual_row_num
+                })
+                processed_count += 1
+                
+                # Check row limit
+                if row_limit and processed_count >= row_limit:
+                    if self.debug:
+                        print(f"  Reached row limit of {row_limit} valid entries")
+                    break
+            
+            if self.debug:
+                print(f"Read {len(valid_entries)} valid names from {sheet_name}!{column}")
+                if row_limit:
+                    print(f"  Applied row limit: {row_limit}")
+                
+            return valid_entries
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Error reading column: {e}")
+            return []
+            
+    def update_row(self, spreadsheet_id: str, sheet_name: str, row_num: int, voter_data: dict, column_mapping: dict):
+        """Update a row with voter data"""
+        try:
+            # Prepare the values to update based on column mapping
+            updates = []
+            
+            for field, column in column_mapping.items():
+                if field in voter_data and voter_data[field]:
+                    value = voter_data[field]
+                    # Handle list values (like notes)
+                    if isinstance(value, list):
+                        value = '; '.join(str(v) for v in value)
+                    
+                    range_name = f"{sheet_name}!{column}{row_num}"
+                    updates.append({
+                        'range': range_name,
+                        'values': [[str(value)]]
+                    })
+                    
+            if updates:
+                # Batch update for efficiency
+                body = {'valueInputOption': 'RAW', 'data': updates}
+                
+                result = self.service.spreadsheets().values().batchUpdate(
+                    spreadsheetId=spreadsheet_id,
+                    body=body
+                ).execute()
+                
+                if self.debug:
+                    print(f"Updated row {row_num} with {len(updates)} fields")
+                    
+                return True
+                
+        except Exception as e:
+            if self.debug:
+                print(f"Error updating row {row_num}: {e}")
+            return False
+            
+    def get_column_headers(self, spreadsheet_id: str, sheet_name: str, header_row: int = 1):
+        """Get column headers to help with mapping"""
+        try:
+            range_name = f"{sheet_name}!{header_row}:{header_row}"
+            
+            result = self.service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=range_name
+            ).execute()
+            
+            values = result.get('values', [[]])
+            headers = values[0] if values else []
+            
+            # Create a mapping of header -> column letter
+            column_map = {}
+            for idx, header in enumerate(headers):
+                if header.strip():
+                    col_letter = chr(65 + idx)  # A, B, C, ...
+                    column_map[header.strip().lower()] = col_letter
+                    
+            return column_map
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Error getting headers: {e}")
+            return {}
+            
+    def column_letter_to_number(self, column_letter: str) -> int:
+        """Convert column letter (A, B, C, etc.) to column number (1, 2, 3, etc.)"""
+        result = 0
+        for char in column_letter.upper():
+            result = result * 26 + (ord(char) - ord('A') + 1)
+        return result
+        
+    def column_number_to_letter(self, column_number: int) -> str:
+        """Convert column number (1, 2, 3, etc.) to column letter (A, B, C, etc.)"""
+        result = ""
+        while column_number > 0:
+            column_number -= 1
+            result = chr(column_number % 26 + ord('A')) + result
+            column_number //= 26
+        return result
+        
+    def generate_column_mapping(self, start_column: str, extract_details: bool = False):
+        """Generate sequential column mapping starting from the specified column"""
+        start_num = self.column_letter_to_number(start_column)
+        
+        # Define the order of basic fields
+        basic_fields = [
+            'phone', 'address', 'city', 'state', 'zip_code', 
+            'date_of_birth', 'calculated_party', 'view_voter_url'
+        ]
+        
+        # Define additional detailed fields if extract_details is enabled
+        detailed_fields = [
+            'first_name', 'middle_name', 'last_name', 'email',
+            'home_phone', 'work_phone', 'cell_phone', 'voter_id',
+            'party_affiliation', 'precinct', 'registration_date',
+            'gender', 'employer', 'occupation'
+        ]
+        
+        # Use basic fields, or basic + detailed based on extract_details flag
+        fields_to_use = basic_fields
+        if extract_details:
+            fields_to_use = basic_fields + detailed_fields
+        
+        # Generate mapping
+        column_mapping = {}
+        for i, field in enumerate(fields_to_use):
+            column_letter = self.column_number_to_letter(start_num + i)
+            column_mapping[field] = column_letter
+            
+        return column_mapping, fields_to_use
+        
+    def check_row_already_processed(self, spreadsheet_id: str, sheet_name: str, row_num: int, start_column: str):
+        """Check if a row already has data in the start column (indicating it's been processed)"""
+        try:
+            # Read the start column cell for this specific row
+            range_name = f"{sheet_name}!{start_column}{row_num}"
+            
+            result = self.service.spreadsheets().values().get(
+                spreadsheetId=spreadsheet_id,
+                range=range_name
+            ).execute()
+            
+            values = result.get('values', [])
+            
+            # If there's any data in the start column, consider it processed
+            if values and values[0] and len(values[0]) > 0 and values[0][0].strip():
+                return True
+            
+            return False
+            
+        except Exception as e:
+            if self.debug:
+                print(f"Warning: Could not check if row {row_num} is processed: {e}")
+            # If we can't check, assume it's not processed to be safe
+            return False
 
 class CredentialManager:
     """Manages secure storage and retrieval of credentials"""
@@ -1084,6 +1403,20 @@ class GOPVoterLookup:
                 
         return all_results
         
+    async def search_single_voter(self, page: Page, voter_name: str, **search_params) -> List[Dict[str, Any]]:
+        """Search for a single voter using an existing authenticated page"""
+        if self.debug:
+            print(f"Searching for: {voter_name}")
+            
+        try:
+            results = await self._search_voter(page, voter_name, **search_params)
+            if self.debug:
+                print(f"Found {len(results)} result(s)")
+            return results
+        except Exception as e:
+            print(f"❌ Error searching for {voter_name}: {e}")
+            return []
+        
     def export_results(self, results: Dict[str, List[Dict[str, Any]]], format: str = "json", filename: Optional[str] = None):
         """Export results to file"""
         if not filename:
@@ -1118,7 +1451,7 @@ async def main():
     import argparse
     
     parser = argparse.ArgumentParser(description="GOP Data Center Voter Lookup")
-    parser.add_argument("voters", nargs="+", help="Voter names to search")
+    parser.add_argument("voters", nargs="*", help="Voter names to search (not required with --sheets)")
     parser.add_argument("--debug", action="store_true", help="Debug mode: shows browser and keeps it open")
     parser.add_argument("--export", choices=["json", "csv"], help="Export format")
     parser.add_argument("--output", help="Output filename")
@@ -1132,7 +1465,23 @@ async def main():
     parser.add_argument("--voter-id", help="Filter by voter ID")
     parser.add_argument("--extract-details", action="store_true", help="Extract detailed voter information (slower)")
     
+    # Google Sheets integration
+    parser.add_argument("--sheets", action="store_true", help="Use Google Sheets integration")
+    parser.add_argument("--spreadsheet-id", help="Google Sheets spreadsheet ID")
+    parser.add_argument("--sheet-name", default="Sheet1", help="Sheet name within spreadsheet")
+    parser.add_argument("--name-column", default="A", help="Column containing voter names (e.g., 'A', 'B')")
+    parser.add_argument("--start-row", type=int, default=2, help="Row to start reading names from")
+    parser.add_argument("--results-start-column", help="Column to start adding voter data (required with --sheets)")
+    parser.add_argument("--row-limit", type=int, help="Limit number of voter lookups (skips empty rows)")
+    
     args = parser.parse_args()
+    
+    # Validate arguments
+    if not args.sheets and not args.voters:
+        parser.error("Either provide voter names as arguments OR use --sheets for Google Sheets integration")
+    
+    if args.sheets and args.voters:
+        print("⚠️  Warning: Voter names provided on command line will be ignored when using --sheets")
     
     # Set headless mode - default is True, False only in debug mode
     headless = not args.debug
@@ -1154,6 +1503,190 @@ async def main():
         if getattr(args, param, None):
             search_params[param] = getattr(args, param)
     
+    # Handle Google Sheets integration
+    if args.sheets:
+        if not args.spreadsheet_id:
+            print("❌ --spreadsheet-id is required when using --sheets")
+            return
+            
+        if not args.results_start_column:
+            print("❌ --results-start-column is required when using --sheets")
+            print("   Example: --results-start-column C (to start adding data from column C)")
+            return
+            
+        sheets_manager = GoogleSheetsManager(Path.cwd(), debug=args.debug)
+        
+        if not sheets_manager.authenticate():
+            print("❌ Failed to authenticate with Google Sheets")
+            return
+            
+        # Get spreadsheet info
+        sheet_info = sheets_manager.get_spreadsheet_info(args.spreadsheet_id)
+        if not sheet_info:
+            print("❌ Failed to access spreadsheet")
+            return
+            
+        print(f"📊 Working with spreadsheet: {sheet_info['title']}")
+        print(f"📋 Available sheets: {', '.join(sheet_info['sheets'])}")
+        
+        if args.sheet_name not in sheet_info['sheets']:
+            print(f"❌ Sheet '{args.sheet_name}' not found")
+            return
+            
+        # Read names from the specified column
+        name_entries = sheets_manager.read_column(
+            args.spreadsheet_id, 
+            args.sheet_name, 
+            args.name_column, 
+            args.start_row,
+            args.row_limit
+        )
+        
+        if not name_entries:
+            print("❌ No valid names found in the specified column")
+            return
+            
+        print(f"📝 Found {len(name_entries)} valid names to lookup")
+        if args.row_limit:
+            print(f"🔢 Limited to {args.row_limit} lookups")
+            
+        # Extract just the names for the lookup
+        names = [entry['name'] for entry in name_entries]
+        
+        # Generate column mapping starting from the specified column
+        column_mapping, fields_order = sheets_manager.generate_column_mapping(
+            args.results_start_column, 
+            args.extract_details
+        )
+        
+        print(f"📋 Data will be added starting from column {args.results_start_column}:")
+        for i, field in enumerate(fields_order):
+            column = column_mapping[field]
+            print(f"   {column}: {field.replace('_', ' ').title()}")
+            
+        # Optionally write headers to the spreadsheet
+        if args.start_row > 1:  # Only if there's a header row
+            headers = [field.replace('_', ' ').title() for field in fields_order]
+            header_range = f"{args.sheet_name}!{args.results_start_column}1"
+            
+            # Create column range for headers (e.g., "C1:J1")
+            end_column = sheets_manager.column_number_to_letter(
+                sheets_manager.column_letter_to_number(args.results_start_column) + len(fields_order) - 1
+            )
+            header_range = f"{args.sheet_name}!{args.results_start_column}1:{end_column}1"
+            
+            try:
+                sheets_manager.service.spreadsheets().values().update(
+                    spreadsheetId=args.spreadsheet_id,
+                    range=header_range,
+                    valueInputOption='RAW',
+                    body={'values': [headers]}
+                ).execute()
+                print(f"✅ Added headers to row 1")
+            except Exception as e:
+                if args.debug:
+                    print(f"⚠️  Could not add headers: {e}")
+        
+        # Process voters individually - search then immediately update
+        print(f"🔄 Processing {len(name_entries)} voters individually...")
+        
+        # Get GOP credentials for authentication
+        if not lookup.credential_manager.check_credentials():
+            username, password = lookup.credential_manager.prompt_credentials()
+            lookup.credential_manager.save_credentials(username, password)
+        else:
+            username, password = lookup.credential_manager.load_credentials()
+        
+        updated_count = 0
+        
+        async with async_playwright() as p:
+            try:
+                browser = await p.chromium.launch(headless=lookup.headless)
+            except Exception as e:
+                if "Executable doesn't exist" in str(e):
+                    print("\nPlaywright browsers not found. Installing now...")
+                    lookup._check_and_install_browsers()
+                    browser = await p.chromium.launch(headless=lookup.headless)
+                else:
+                    raise
+                    
+            context = await browser.new_context()
+            page = await context.new_page()
+            
+            try:
+                # Navigate and authenticate once
+                if args.debug:
+                    print(f"Navigating to: {lookup.base_url}")
+                await page.goto(lookup.base_url)
+                
+                if args.debug:
+                    print("Authenticating...")
+                if not await lookup._authenticate(page, username, password):
+                    print("❌ Authentication failed")
+                    return
+                
+                # Process each voter individually
+                skipped_count = 0
+                for entry_idx, name_entry in enumerate(name_entries):
+                    voter_name = name_entry['name']
+                    current_row = name_entry['row']
+                    
+                    print(f"\n[{entry_idx + 1}/{len(name_entries)}] Processing: {voter_name} (row {current_row})")
+                    
+                    # Check if this row already has data (indicating it's been processed)
+                    if sheets_manager.check_row_already_processed(
+                        args.spreadsheet_id,
+                        args.sheet_name,
+                        current_row,
+                        args.results_start_column
+                    ):
+                        print(f"  ⏭️  Skipped - already processed")
+                        skipped_count += 1
+                        continue
+                    
+                    # Search for this voter
+                    voter_results = await lookup.search_single_voter(page, voter_name, **search_params)
+                    
+                    if voter_results:
+                        # Use the first result if multiple found
+                        voter_data = voter_results[0]
+                        
+                        # Immediately update the spreadsheet row
+                        if sheets_manager.update_row(
+                            args.spreadsheet_id,
+                            args.sheet_name,
+                            current_row,
+                            voter_data,
+                            column_mapping
+                        ):
+                            updated_count += 1
+                            print(f"  ✅ Updated row {current_row}")
+                        else:
+                            print(f"  ❌ Failed to update row {current_row}")
+                    else:
+                        print(f"  ⚠️  No results found")
+                    
+                    # Brief delay between searches
+                    if entry_idx < len(name_entries) - 1:
+                        await page.wait_for_timeout(1000)
+                
+                # Debug mode: keep browser open
+                if args.debug:
+                    print("\n⚠️  Debug mode: Browser will remain open")
+                    print("Press Enter to close the browser and exit...")
+                    input()
+                        
+            finally:
+                await browser.close()
+                
+        processed_count = len(name_entries) - skipped_count
+        print(f"\n🎉 Processing complete:")
+        print(f"   ✅ Updated: {updated_count}")
+        print(f"   ⏭️  Skipped (already processed): {skipped_count}")
+        print(f"   📊 Total processed: {processed_count}/{len(name_entries)}")
+        return
+    
+    # Standard command line mode
     # Perform searches
     results = await lookup.search_voters(args.voters, **search_params)
     

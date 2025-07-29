@@ -13,6 +13,7 @@ Automated voter lookup script for the GOP Data Center website using Playwright b
 - Search filters (address, city, zip, phone, voter ID)
 - Optional detailed voter information extraction from individual voter pages
 - Direct links to voter detail pages for manual browsing
+- Google Sheets integration for bulk processing and automated data updates
 
 ## Installation
 
@@ -34,7 +35,12 @@ That's it! The script will automatically install dependencies and browsers when 
 
 ## Usage
 
-### Basic Search
+The script operates in two modes:
+
+1. **Command Line Mode**: Search specific voters by providing names as arguments
+2. **Google Sheets Mode**: Bulk process voters from a Google Sheet using `--sheets`
+
+### Command Line Mode
 
 #### With uv (Recommended)
 Search for a single voter:
@@ -108,6 +114,15 @@ All examples below work with both `./gop_voter_lookup.py` (uv) or `python gop_vo
 - `--export`: Export results to JSON or CSV format
 - `--output`: Specify output filename for exports
 
+#### Google Sheets Integration
+- `--sheets`: Enable Google Sheets integration mode
+- `--spreadsheet-id`: Google Sheets spreadsheet ID (required with --sheets)
+- `--sheet-name`: Sheet name within spreadsheet (default: "Sheet1")
+- `--name-column`: Column containing voter names (default: "A")
+- `--start-row`: Row to start reading names from (default: 2)
+- `--results-start-column`: Column to start adding voter data (required with --sheets)
+- `--row-limit`: Limit number of voter lookups (skips empty rows)
+
 ## Security
 
 - Credentials are encrypted using Fernet symmetric encryption
@@ -138,52 +153,116 @@ Result 1:
 
 The "📄 View Full Details" link provides direct access to the voter's complete profile page on the GOP Data Center, allowing you to manually browse additional information or verify the automated extraction results.
 
-### Detailed Information (--extract-details)
-When using the `--extract-details` flag, the script extracts comprehensive information from individual voter detail pages:
 
-```
-=== Results for John Doe ===
+## Google Sheets Integration
 
-Result 1:
-  name: DOE, JOHN M.
-  address: 123 Main St
-  city: Houston
-  state: TX
-  zip_code: 77001
-  phone: (713)555-1234
-  date_of_birth: 05/15/1965
-  calculated_party: 2 - Soft Republican
+The script can integrate with Google Sheets to automatically read voter names from a spreadsheet and update it with voter data. This is perfect for bulk processing of voter lists.
 
-  --- Detailed Information ---
+### Setup
 
-  Personal:
-    first_name: JOHN
-    middle_name: M
-    last_name: DOE
-    gender: M
-    birthday: 05/15/1965
-    age: 58
+1. **Enable Google Sheets API**: The script will walk you through the setup if no credentials are detected.
 
-  Contact:
-    email: john.doe@example.com
-    home_phone: (713)555-1234
-    work_phone: (713)555-5678
-    cell_phone: (713)555-9999
+2. **Prepare your spreadsheet**:
+   - Create a Google Sheet with voter names in column A (starting from row 2)
+   - Add headers in row 1 for the data you want to populate
+   - Note the spreadsheet ID from the URL: `https://docs.google.com/spreadsheets/d/{SPREADSHEET_ID}/edit`
+   - **For Service Account**: Share the sheet with the service account email (Editor permissions)
 
-  Voter Info:
-    voter_id: TX1234567890
-    registration_date: 01/15/1990
-    party_affiliation: Republican
-    voter_status: Active
-    precinct: 123
+### Google Sheets Mode Usage
 
-  Districts:
-    district_congress: 7
-    district_state_house: 134
-    district_state_senate: 11
+**Note**: When using `--sheets`, you don't need to provide voter names as command line arguments - they are read from your spreadsheet.
+
+```bash
+# Basic Google Sheets integration (reads names from column A, adds data starting from column C)
+./gop_voter_lookup.py --sheets --spreadsheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms" \
+  --results-start-column "C"
+
+# Specify custom sheet name and name column
+./gop_voter_lookup.py --sheets --spreadsheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms" \
+  --sheet-name "Voters" --name-column "B" --start-row 3 --results-start-column "D"
+
+# Safe approach - start data after existing columns
+./gop_voter_lookup.py --sheets --spreadsheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms" \
+  --results-start-column "F"  # Assumes columns A-E contain existing data
+
+# Process only first 50 valid names (skips empty rows)
+./gop_voter_lookup.py --sheets --spreadsheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms" \
+  --results-start-column "C" --row-limit 50
+
+# Test with just 1 lookups for debugging
+./gop_voter_lookup.py --sheets --spreadsheet-id "1BxiMVs0XRA5nFMdKvBdBZjgmUUqptlbs74OgvE2upms" \
+  --results-start-column "C" --row-limit 1 --debug
 ```
 
-**Note:** Detailed extraction is significantly slower as it must visit each voter's individual detail page.
+### How Column Assignment Works
+
+The script automatically assigns voter data to sequential columns starting from your specified `--results-start-column`:
+
+**Basic data fields (default):**
+1. Phone
+2. Address  
+3. City
+4. State
+5. ZIP Code
+6. Date of Birth
+7. Party Affiliation
+8. View Voter URL
+
+**With `--extract-details`, additional fields are added:**
+9. First Name
+10. Middle Name
+11. Last Name
+12. Email
+13. Home Phone
+14. Work Phone
+15. Cell Phone
+16. Voter ID
+17. Party Affiliation
+18. Precinct
+19. Registration Date
+20. Gender
+21. Employer
+22. Occupation
+
+### Column Assignment Example
+
+If you specify `--results-start-column "D"`, the data will be assigned like this:
+
+| A | B | C | D (Phone) | E (Address) | F (City) | G (State) | H (ZIP) | I (DOB) | J (Party) | K (URL) |
+|---|---|---|-----------|-------------|----------|-----------|---------|---------|-----------|---------|
+| John Doe | [existing] | [existing] | (555)123-4567 | 123 Main St | Austin | TX | 78701 | 01/15/1980 | Republican | https://... |
+
+This approach ensures your existing data in columns A-C remains safe.
+
+### Row Processing Features
+
+- **Empty row skipping**: Automatically skips any rows with empty or blank names
+- **Already processed detection**: Skips rows that already have data in the start column
+- **Row limit**: Use `--row-limit N` to process only the first N valid (non-empty) entries
+- **Accurate row mapping**: Data is written to the correct rows even when empty rows are skipped
+- **Automatic headers**: Creates column headers in row 1 when `--start-row` is 2 or higher
+- **Resume capability**: Can safely re-run on partially processed spreadsheets
+
+**Example with empty rows and already processed data:**
+```
+Row 1: [Headers]
+Row 2: John Doe      [Phone data exists] ← Skipped (already processed)
+Row 3:               ← Skipped (empty)
+Row 4: Jane Smith    ← Processed (1st new)
+Row 5:               ← Skipped (empty) 
+Row 6: Bob Johnson   [Phone data exists] ← Skipped (already processed)
+Row 7: Alice Cooper  ← Processed (2nd new)
+```
+
+**Output:**
+```
+🎉 Processing complete:
+   ✅ Updated: 2
+   ⏭️  Skipped (already processed): 2
+   📊 Total processed: 4/7
+```
+
+This makes it safe to re-run the script on partially processed spreadsheets.
 
 ### JSON Export
 ```json
