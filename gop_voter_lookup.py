@@ -77,6 +77,7 @@ class DetailedVoterRecord:
     official_party: Optional[str] = None
     observed_party: Optional[str] = None
     calculated_party: Optional[str] = None
+    absentee_status: Optional[str] = None
     
     # Ethnicity information
     state_reported_ethnicity: Optional[str] = None
@@ -318,6 +319,9 @@ class GoogleSheetsManager:
                         'values': [[str(value)]]
                     })
                     
+                    if self.debug:
+                        print(f"    Mapping {field} = '{value}' -> {column}{row_num}")
+                    
             if updates:
                 # Batch update for efficiency
                 body = {'valueInputOption': 'RAW', 'data': updates}
@@ -392,10 +396,12 @@ class GoogleSheetsManager:
         
         # Define additional detailed fields if extract_details is enabled
         detailed_fields = [
-            'first_name', 'middle_name', 'last_name', 'email',
-            'home_phone', 'work_phone', 'cell_phone', 'voter_id',
-            'party_affiliation', 'precinct', 'registration_date',
-            'gender', 'employer', 'occupation'
+            'first_name', 'middle_name', 'last_name', 'birthday', 'age', 'gender',
+            'mobile_phone', 'landline_phone', 'primary_address', 'secondary_address',
+            'registration_status', 'registration_date', 'official_party', 'observed_party',
+            'modeled_ethnicity', 'gopdc_voter_key', 'rnc_client_id', 'state_voter_id',
+            'congressional_district', 'senate_district', 'legislative_district', 
+            'jurisdiction', 'precinct'
         ]
         
         # Use basic fields, or basic + detailed based on extract_details flag
@@ -820,74 +826,117 @@ class GOPVoterLookup:
         return results
         
     async def _extract_detailed_info_for_row(self, page: Page, row_locator, row_index: int) -> Optional[Dict[str, Any]]:
-        """Extract detailed voter information by clicking View Voter button for a specific row"""
+        """Extract detailed voter information by navigating to detail page"""
         try:
             if self.debug:
                 print(f"    Attempting to extract detailed info for row {row_index}")
                 
-            # Look for View Voter button/link in this row
-            view_voter_button = None
+            # First, try to extract the View Voter URL from the row
+            view_voter_url = None
             
-            # Try different selectors for the View Voter button
-            possible_selectors = [
-                'a[id*="ViewVoter"]',
-                'input[id*="ViewVoter"]', 
-                'button[id*="ViewVoter"]',
-                'a:has-text("View Voter")',
-                'input[value*="View"]',
-                'a[title*="View"]'
-            ]
-            
-            for selector in possible_selectors:
-                try:
-                    button = row_locator.locator(selector).first
-                    if await button.is_visible():
-                        view_voter_button = button
-                        if self.debug:
-                            print(f"      Found View Voter button using selector: {selector}")
-                        break
-                except:
-                    continue
-            
-            if not view_voter_button:
-                if self.debug:
-                    print(f"      No View Voter button found for row {row_index}")
-                return None
+            # Look for OpenUserWindow function in the row HTML
+            try:
+                row_html = await row_locator.inner_html()
+                import re
+                open_user_window_match = re.search(r'OpenUserWindow\s*\(\s*(\d+)\s*\)', row_html)
                 
-            # Get the current number of pages before clicking
+                if open_user_window_match:
+                    record_id = open_user_window_match.group(1)
+                    view_voter_url = f"https://www.gopdatacenter.com/rnc/RecordLookup/RecordMaintenance.aspx?id={record_id}"
+                    if self.debug:
+                        print(f"      Found voter detail URL: {view_voter_url}")
+            except Exception as e:
+                if self.debug:
+                    print(f"      Could not extract URL from row: {e}")
+            
+            # If we couldn't get URL from HTML, try clicking the button
+            if not view_voter_url:
+                view_voter_button = None
+                
+                # Try different selectors for the View Voter button
+                possible_selectors = [
+                    'a[id*="ViewVoter"]',
+                    'input[id*="ViewVoter"]', 
+                    'button[id*="ViewVoter"]',
+                    'a:has-text("View Voter")',
+                    'input[value*="View"]',
+                    'a[title*="View"]'
+                ]
+                
+                for selector in possible_selectors:
+                    try:
+                        button = row_locator.locator(selector).first
+                        if await button.is_visible():
+                            view_voter_button = button
+                            if self.debug:
+                                print(f"      Found View Voter button using selector: {selector}")
+                            break
+                    except:
+                        continue
+                
+                if not view_voter_button:
+                    if self.debug:
+                        print(f"      No View Voter button found for row {row_index}")
+                    return None
+                
+            # Get the current number of pages before navigation
             initial_pages = len(page.context.pages)
             
-            # Click the View Voter button
-            if self.debug:
-                print(f"      Clicking View Voter button...")
-            await view_voter_button.click()
-            
-            # Wait for new page/tab to open or current page to navigate
-            await page.wait_for_timeout(2000)  # Give time for navigation/new tab
-            
-            current_pages = len(page.context.pages)
+            # Navigate to detail page
             detail_page = None
             
-            if current_pages > initial_pages:
-                # New tab opened
-                detail_page = page.context.pages[-1]  # Get the newest page
+            if view_voter_url:
+                # Direct navigation - always open in new tab
                 if self.debug:
-                    print(f"      New tab opened, switching to detail page")
+                    print(f"      Navigating directly to: {view_voter_url}")
+                detail_page = await page.context.new_page()
+                await detail_page.goto(view_voter_url)
             else:
-                # Current page navigated
-                detail_page = page  
+                # Click the View Voter button
                 if self.debug:
-                    print(f"      Current page navigated to detail view")
+                    print(f"      Clicking View Voter button...")
+                await view_voter_button.click()
+                
+                # Wait for new page/tab to open or current page to navigate
+                await page.wait_for_timeout(2000)  # Give time for navigation/new tab
+                
+                current_pages = len(page.context.pages)
+                
+                if current_pages > initial_pages:
+                    # New tab opened
+                    detail_page = page.context.pages[-1]  # Get the newest page
+                    if self.debug:
+                        print(f"      New tab opened, switching to detail page")
+                else:
+                    # Current page navigated
+                    detail_page = page  
+                    if self.debug:
+                        print(f"      Current page navigated to detail view")
             
             # Wait for the detail page to load
             await detail_page.wait_for_load_state("networkidle", timeout=10000)
             
+            if self.debug:
+                print(f"      Detail page URL: {detail_page.url}")
+                print(f"      Detail page title: {await detail_page.title()}")
+            
+            # Verify we're on the detail page by checking for specific elements
+            is_detail_page = await detail_page.locator('article#personal-info').count() > 0
+            
+            if not is_detail_page:
+                if self.debug:
+                    print(f"      Warning: Not on detail page, skipping extraction")
+                return None
+            
             # Extract detailed information
             detailed_record = await self._extract_detailed_voter_info(detail_page)
             
-            # Close the new tab if one was opened, or navigate back if current page was used
-            if current_pages > initial_pages:
-                # New tab was opened, close it
+            if self.debug and detailed_record:
+                print(f"      Extracted fields: {[k for k, v in asdict(detailed_record).items() if v is not None]}")
+            
+            # Close the detail page if needed
+            if view_voter_url or (detail_page != page):
+                # We opened a new tab
                 await detail_page.close()
                 if self.debug:
                     print(f"      Closed detail tab")
@@ -926,9 +975,15 @@ class GOPVoterLookup:
             detailed_record = DetailedVoterRecord(name="")
             
             # Extract information from each article section
+            # Try different selectors for articles
             articles = page.locator('article')
             article_count = await articles.count()
             
+            # If no articles found, try divs with class containing article info
+            if article_count == 0:
+                articles = page.locator('div.search-article')
+                article_count = await articles.count()
+                
             if self.debug:
                 print(f"  Found {article_count} article sections")
             
@@ -952,28 +1007,30 @@ class GOPVoterLookup:
             if self.debug:
                 print(f"    Processing article with content (first 100 chars): {article_text[:100]}...")
             
-            # Determine article type based on content
-            if "Personal Info" in article_text:
+            # Determine article type based on content (case-insensitive)
+            article_text_upper = article_text.upper()
+            
+            if "PERSONAL INFO" in article_text_upper:
                 await self._extract_personal_info(article, detailed_record)
-            elif "Contact Info" in article_text:
+            elif "CONTACT INFO" in article_text_upper and "OTHER CONTACT" not in article_text_upper:
                 await self._extract_contact_info(article, detailed_record)
-            elif "Voter Info" in article_text:
+            elif "VOTER INFO" in article_text_upper:
                 await self._extract_voter_info(article, detailed_record)
-            elif "Voter Identification" in article_text:
+            elif "VOTER IDENTIFICATION" in article_text_upper:
                 await self._extract_voter_identification(article, detailed_record)
-            elif "District Info" in article_text:
+            elif "DISTRICT INFO" in article_text_upper:
                 await self._extract_district_info(article, detailed_record)
-            elif "Vote History" in article_text:
+            elif "VOTE HISTORY" in article_text_upper:
                 await self._extract_vote_history(article, detailed_record)
-            elif "Voter Frequency" in article_text:
+            elif "VOTER FREQUENCY" in article_text_upper:
                 await self._extract_voter_frequency(article, detailed_record)
-            elif "Geographical Location" in article_text:
+            elif "GEOGRAPHICAL LOCATION" in article_text_upper:
                 await self._extract_geographical_info(article, detailed_record)
-            elif "Tags" in article_text:
+            elif "TAGS" in article_text_upper:
                 if self.debug:
                     print(f"    Skipping Tags section as requested")
                 # Skip tags as they're not useful
-            elif "Notes" in article_text:
+            elif "NOTES" in article_text_upper:
                 await self._extract_notes(article, detailed_record)
             else:
                 if self.debug:
@@ -989,18 +1046,23 @@ class GOPVoterLookup:
     async def _extract_personal_info(self, article, detailed_record: DetailedVoterRecord):
         """Extract personal information from Personal Info article"""
         try:
-            # Extract name components
-            first_name_elem = article.locator('h6:has-text("First Name") + *')
+            if self.debug:
+                print(f"    Extracting Personal Info...")
+            # Extract name components using span IDs
+            first_name_elem = article.locator('span[id*="lblFirstName"]')
             if await first_name_elem.count() > 0:
-                detailed_record.first_name = await first_name_elem.first.inner_text()
+                value = await first_name_elem.inner_text()
+                detailed_record.first_name = value
+                if self.debug:
+                    print(f"      Found first_name: {value}")
                 
-            middle_name_elem = article.locator('h6:has-text("Middle Name") + *')
+            middle_name_elem = article.locator('span[id*="lblMiddleName"]')
             if await middle_name_elem.count() > 0:
-                detailed_record.middle_name = await middle_name_elem.first.inner_text()
+                detailed_record.middle_name = await middle_name_elem.inner_text()
                 
-            last_name_elem = article.locator('h6:has-text("Last Name") + *')
+            last_name_elem = article.locator('span[id*="lblLastName"]')
             if await last_name_elem.count() > 0:
-                detailed_record.last_name = await last_name_elem.first.inner_text()
+                detailed_record.last_name = await last_name_elem.inner_text()
                 
             # Construct full name
             if detailed_record.first_name or detailed_record.last_name:
@@ -1008,19 +1070,19 @@ class GOPVoterLookup:
                 detailed_record.name = " ".join(name_parts)
             
             # Extract birthday
-            birthday_elem = article.locator('h6:has-text("Birthday") + *')
+            birthday_elem = article.locator('span[id*="lblBirthday"]')
             if await birthday_elem.count() > 0:
-                detailed_record.birthday = await birthday_elem.first.inner_text()
+                detailed_record.birthday = await birthday_elem.inner_text()
             
             # Extract age  
-            age_elem = article.locator('h6:has-text("Age") + *')
+            age_elem = article.locator('span[id*="lblAge"]')
             if await age_elem.count() > 0:
-                detailed_record.age = await age_elem.first.inner_text()
+                detailed_record.age = await age_elem.inner_text()
                 
             # Extract gender
-            gender_elem = article.locator('h6:has-text("Gender") + *')
+            gender_elem = article.locator('span[id*="lblGender"]')
             if await gender_elem.count() > 0:
-                detailed_record.gender = await gender_elem.first.inner_text()
+                detailed_record.gender = await gender_elem.inner_text()
                 
         except Exception as e:
             if self.debug:
@@ -1029,62 +1091,88 @@ class GOPVoterLookup:
     async def _extract_contact_info(self, article, detailed_record: DetailedVoterRecord):
         """Extract contact information from Contact Info article"""
         try:
-            # Extract mobile phone
-            mobile_elem = article.locator('h6:has-text("Mobile Phone") + *').first
-            if await mobile_elem.count() > 0:
-                detailed_record.mobile_phone = await mobile_elem.inner_text()
-                
-            # Extract mobile phone TRC
-            mobile_trc_elem = article.locator('h6:has-text("TRC") + *').first
-            if await mobile_trc_elem.count() > 0:
-                detailed_record.mobile_phone_reliability = await mobile_trc_elem.inner_text()
+            # Extract phone information - look for phone containers
+            phone_containers = article.locator('.col-xs-12.col-sm-3')
+            phone_count = await phone_containers.count()
             
-            # Extract landline phone
-            landline_elem = article.locator('h6:has-text("Landline Phone") + *').first
-            if await landline_elem.count() > 0:
-                detailed_record.landline_phone = await landline_elem.inner_text()
+            for i in range(phone_count):
+                container = phone_containers.nth(i)
+                
+                # Get all h6 elements in this container
+                h6_elements = container.locator('h6')
+                if await h6_elements.count() > 0:
+                    # Get the first h6 which should be the phone type
+                    phone_type = await h6_elements.first.inner_text()
+                    
+                    # Get phone number - it's in a span right after the phone type h6
+                    phone_elem = container.locator('span[id*="lblPhone"]')
+                    if await phone_elem.count() > 0:
+                        phone_number = await phone_elem.inner_text()
+                        
+                        # Get TRC (reliability) - it's in a span with lblTRC
+                        trc_elem = container.locator('span[id*="lblTRC"]')
+                        trc_value = await trc_elem.inner_text() if await trc_elem.count() > 0 else None
+                        
+                        # Map to appropriate field based on phone type
+                        if "Mobile Phone" in phone_type and not phone_number.startswith("No Data"):
+                            if not detailed_record.mobile_phone:  # Only set if not already set
+                                detailed_record.mobile_phone = phone_number
+                                if trc_value:
+                                    detailed_record.mobile_phone_reliability = trc_value
+                        elif "Landline Phone" in phone_type and not phone_number.startswith("No Data"):
+                            if not detailed_record.landline_phone:  # Only set if not already set
+                                detailed_record.landline_phone = phone_number
+                                if trc_value:
+                                    detailed_record.landline_phone_reliability = trc_value
             
             # Extract primary address
-            primary_addr_elem = article.locator('h6:has-text("Primary Address") + *').first
+            primary_addr_elem = article.locator('span[id*="lblPrimaryAddress"]')
             if await primary_addr_elem.count() > 0:
-                addr_text = await primary_addr_elem.inner_text()
-                # Get the next sibling for the full address
-                next_elem = article.locator('h6:has-text("Primary Address")').locator('..').locator('*').nth(1)
-                if await next_elem.count() > 0:
-                    addr_line2 = await next_elem.inner_text()
-                    detailed_record.primary_address = f"{addr_text}, {addr_line2}"
+                addr_line1 = await primary_addr_elem.inner_text()
+                # Get city, state, zip
+                city_state_zip_elem = article.locator('span[id*="lblPrimaryCityStZip"]')
+                if await city_state_zip_elem.count() > 0:
+                    city_state_zip = await city_state_zip_elem.inner_text()
+                    detailed_record.primary_address = f"{addr_line1}, {city_state_zip}"
                 else:
-                    detailed_record.primary_address = addr_text
+                    detailed_record.primary_address = addr_line1
                     
             # Extract secondary address  
-            secondary_addr_elem = article.locator('h6:has-text("Secondary Address") + *').first
+            secondary_addr_elem = article.locator('span[id*="lblSecondaryAddress"]')
             if await secondary_addr_elem.count() > 0:
-                addr_text = await secondary_addr_elem.inner_text()
-                next_elem = article.locator('h6:has-text("Secondary Address")').locator('..').locator('*').nth(1)
-                if await next_elem.count() > 0:
-                    addr_line2 = await next_elem.inner_text()
-                    detailed_record.secondary_address = f"{addr_text}, {addr_line2}"
+                addr_line1 = await secondary_addr_elem.inner_text()
+                # Get city, state, zip
+                city_state_zip_elem = article.locator('span[id*="lblSecondaryCityStZip"]')
+                if await city_state_zip_elem.count() > 0:
+                    city_state_zip = await city_state_zip_elem.inner_text()
+                    detailed_record.secondary_address = f"{addr_line1}, {city_state_zip}"
                 else:
-                    detailed_record.secondary_address = addr_text
+                    detailed_record.secondary_address = addr_line1
             
-            # Extract social media (if not "No Data Provided")
-            facebook_elem = article.locator('h6:has-text("Facebook") + *').first
-            if await facebook_elem.count() > 0:
-                fb_text = await facebook_elem.inner_text()
-                if fb_text != "No Data Provided":
-                    detailed_record.facebook = fb_text
+            # Extract social media from repeater pattern
+            social_repeaters = article.locator('div[id*="rptSocial"]')
+            social_count = await social_repeaters.count()
+            
+            for i in range(social_count):
+                social_container = social_repeaters.nth(i)
+                
+                # Get social media type from h6
+                social_type_elem = social_container.locator('h6').first
+                if await social_type_elem.count() > 0:
+                    social_type = await social_type_elem.inner_text()
                     
-            instagram_elem = article.locator('h6:has-text("Instagram") + *').first
-            if await instagram_elem.count() > 0:
-                ig_text = await instagram_elem.inner_text()
-                if ig_text != "No Data Provided":
-                    detailed_record.instagram = ig_text
-                    
-            twitter_elem = article.locator('h6:has-text("Twitter") + *').first
-            if await twitter_elem.count() > 0:
-                tw_text = await twitter_elem.inner_text()
-                if tw_text != "No Data Provided":
-                    detailed_record.twitter = tw_text
+                    # Get social media value
+                    social_elem = social_container.locator('span[id*="lblSocial"]')
+                    if await social_elem.count() > 0:
+                        social_value = await social_elem.inner_text()
+                        
+                        if social_value and not social_value.startswith("No Data"):
+                            if "Facebook" in social_type:
+                                detailed_record.facebook = social_value
+                            elif "Instagram" in social_type:
+                                detailed_record.instagram = social_value
+                            elif "Twitter" in social_type:
+                                detailed_record.twitter = social_value
                     
         except Exception as e:
             if self.debug:
@@ -1094,34 +1182,60 @@ class GOPVoterLookup:
         """Extract voter registration information"""
         try:
             # Registration status
-            reg_status_elem = article.locator('h6:has-text("Registration Status") + *').first
+            reg_status_elem = article.locator('span[id*="lblRegistrationStatus"]')
             if await reg_status_elem.count() > 0:
                 detailed_record.registration_status = await reg_status_elem.inner_text()
             
             # Registration date
-            reg_date_elem = article.locator('h6:has-text("Registration Date") + *').first
+            reg_date_elem = article.locator('span[id*="lblRegistrationDate"]')
             if await reg_date_elem.count() > 0:
                 detailed_record.registration_date = await reg_date_elem.inner_text()
                 
+            # Last activity date
+            last_activity_elem = article.locator('span[id*="lblLastVoterActivity"]')
+            if await last_activity_elem.count() > 0:
+                detailed_record.last_activity_date = await last_activity_elem.inner_text()
+                
             # Official party
-            official_party_elem = article.locator('h6:has-text("Official Party") + *').first
+            official_party_elem = article.locator('span[id*="lblOfficialParty"]')
             if await official_party_elem.count() > 0:
                 detailed_record.official_party = await official_party_elem.inner_text()
                 
             # Observed party
-            observed_party_elem = article.locator('h6:has-text("Observed Party") + *').first
+            observed_party_elem = article.locator('span[id*="lblParty"]').first
             if await observed_party_elem.count() > 0:
                 detailed_record.observed_party = await observed_party_elem.inner_text()
                 
             # Calculated party
-            calc_party_elem = article.locator('h6:has-text("Calculated Party") + *').first
+            calc_party_elem = article.locator('span[id*="lblRNCCalcParty"]')
             if await calc_party_elem.count() > 0:
                 detailed_record.calculated_party = await calc_party_elem.inner_text()
                 
+            # Absentee status
+            absentee_status_elem = article.locator('span[id*="lblAbsenteeStatus"]')
+            if await absentee_status_elem.count() > 0:
+                value = await absentee_status_elem.inner_text()
+                if not value.startswith("No Data"):
+                    detailed_record.absentee_status = value
+                    
+            # State reported ethnicity
+            state_eth_elem = article.locator('span[id*="lblStateReportedEthnicity"]')
+            if await state_eth_elem.count() > 0:
+                value = await state_eth_elem.inner_text()
+                if value != "No Data Provided":
+                    detailed_record.state_reported_ethnicity = value
+                    
             # Modeled ethnicity
-            modeled_eth_elem = article.locator('h6:has-text("Modeled Ethnicity") + *').first
+            modeled_eth_elem = article.locator('span[id*="lblEthnicity"]')
             if await modeled_eth_elem.count() > 0:
                 detailed_record.modeled_ethnicity = await modeled_eth_elem.inner_text()
+                
+            # Observed ethnicity
+            observed_eth_elem = article.locator('span[id*="lblObservedEthnicity"]')
+            if await observed_eth_elem.count() > 0:
+                value = await observed_eth_elem.inner_text()
+                if value != "No Data Provided":
+                    detailed_record.observed_ethnicity = value
                 
         except Exception as e:
             if self.debug:
@@ -1131,19 +1245,31 @@ class GOPVoterLookup:
         """Extract voter ID numbers"""
         try:
             # GOPDC Voter Key
-            gopdc_elem = article.locator('h6:has-text("GOPDC Voter Key") + *').first
+            gopdc_elem = article.locator('span[id*="lblVoterId"]')
             if await gopdc_elem.count() > 0:
                 detailed_record.gopdc_voter_key = await gopdc_elem.inner_text()
                 
             # RNC Client ID
-            rnc_elem = article.locator('h6:has-text("RNC Client ID") + *').first
+            rnc_elem = article.locator('span[id*="lblClientId"]')
             if await rnc_elem.count() > 0:
                 detailed_record.rnc_client_id = await rnc_elem.inner_text()
                 
             # State Voter ID
-            state_elem = article.locator('h6:has-text("State Voter ID") + *').first
+            state_elem = article.locator('span[id*="lblStateVoterId"]')
             if await state_elem.count() > 0:
                 detailed_record.state_voter_id = await state_elem.inner_text()
+                
+            # Jurisdictional Voter ID
+            jurisdictional_elem = article.locator('span[id*="lblRegistrationId"]')
+            if await jurisdictional_elem.count() > 0:
+                value = await jurisdictional_elem.inner_text()
+                if not value.startswith("No Data"):
+                    detailed_record.jurisdictional_voter_id = value
+                    
+            # RNC Registration ID
+            rnc_reg_elem = article.locator('span[id*="lblRncRegId"]')
+            if await rnc_reg_elem.count() > 0:
+                detailed_record.rnc_registration_id = await rnc_reg_elem.inner_text()
                 
         except Exception as e:
             if self.debug:
@@ -1153,24 +1279,48 @@ class GOPVoterLookup:
         """Extract district information"""
         try:
             # Congressional District
-            cong_elem = article.locator('h6:has-text("Congressional District") + *').first
+            cong_elem = article.locator('span[id*="lblCDName"]')
             if await cong_elem.count() > 0:
                 detailed_record.congressional_district = await cong_elem.inner_text()
                 
             # Senate District
-            senate_elem = article.locator('h6:has-text("Senate District") + *').first
+            senate_elem = article.locator('span[id*="lblSDName"]')
             if await senate_elem.count() > 0:
                 detailed_record.senate_district = await senate_elem.inner_text()
                 
             # Legislative District
-            leg_elem = article.locator('h6:has-text("Legislative District") + *').first
+            leg_elem = article.locator('span[id*="lblLDName"]')
             if await leg_elem.count() > 0:
                 detailed_record.legislative_district = await leg_elem.inner_text()
                 
+            # Jurisdiction
+            jurisdiction_elem = article.locator('span[id*="lblCountyName"]')
+            if await jurisdiction_elem.count() > 0:
+                detailed_record.jurisdiction = await jurisdiction_elem.inner_text()
+                
             # Precinct
-            precinct_elem = article.locator('h6:has-text("Precinct") + *').first
+            precinct_elem = article.locator('span[id*="lblPrecinct"]').first
             if await precinct_elem.count() > 0:
                 detailed_record.precinct = await precinct_elem.inner_text()
+                
+            # Precinct Number
+            precinct_num_elem = article.locator('span[id*="lblPrecinctNumber"]')
+            if await precinct_num_elem.count() > 0:
+                detailed_record.precinct_number = await precinct_num_elem.inner_text()
+                
+            # Custom Districts
+            custom_districts = []
+            custom_district_elems = article.locator('span[id*="lblCustomDistrict"]')
+            custom_count = await custom_district_elems.count()
+            
+            for i in range(custom_count):
+                custom_elem = custom_district_elems.nth(i)
+                district_text = await custom_elem.inner_text()
+                if district_text:
+                    custom_districts.append(district_text)
+            
+            if custom_districts:
+                detailed_record.custom_districts = custom_districts
                 
         except Exception as e:
             if self.debug:
@@ -1546,9 +1696,9 @@ async def main():
             print("❌ No valid names found in the specified column")
             return
             
-        print(f"📝 Found {len(name_entries)} valid names to lookup")
+        print(f"📝 Found {len(name_entries)} valid names in spreadsheet")
         if args.row_limit:
-            print(f"🔢 Limited to {args.row_limit} lookups")
+            print(f"🔢 Will process up to {args.row_limit} rows (including already processed ones)")
             
         # Extract just the names for the lookup
         names = [entry['name'] for entry in name_entries]
@@ -1627,6 +1777,8 @@ async def main():
                 
                 # Process each voter individually
                 skipped_count = 0
+                processed_count = 0
+                
                 for entry_idx, name_entry in enumerate(name_entries):
                     voter_name = name_entry['name']
                     current_row = name_entry['row']
@@ -1642,6 +1794,13 @@ async def main():
                     ):
                         print(f"  ⏭️  Skipped - already processed")
                         skipped_count += 1
+                        # Important: Count this toward the processed total for row limit
+                        processed_count += 1
+                        
+                        # Check if we've reached the row limit
+                        if args.row_limit and processed_count >= args.row_limit:
+                            print(f"\n🔢 Reached row limit of {args.row_limit}")
+                            break
                         continue
                     
                     # Search for this voter
@@ -1650,6 +1809,15 @@ async def main():
                     if voter_results:
                         # Use the first result if multiple found
                         voter_data = voter_results[0]
+                        
+                        # If extract_details is enabled and detailed_info exists, merge it into voter_data
+                        if args.extract_details and 'detailed_info' in voter_data and voter_data['detailed_info']:
+                            # Merge detailed_info fields into the main voter_data dictionary
+                            detailed_info = voter_data.pop('detailed_info')
+                            voter_data.update(detailed_info)
+                            
+                        if args.debug:
+                            print(f"  Available fields in voter_data: {list(voter_data.keys())}")
                         
                         # Immediately update the spreadsheet row
                         if sheets_manager.update_row(
@@ -1666,6 +1834,14 @@ async def main():
                     else:
                         print(f"  ⚠️  No results found")
                     
+                    # Increment processed count
+                    processed_count += 1
+                    
+                    # Check if we've reached the row limit
+                    if args.row_limit and processed_count >= args.row_limit:
+                        print(f"\n🔢 Reached row limit of {args.row_limit}")
+                        break
+                    
                     # Brief delay between searches
                     if entry_idx < len(name_entries) - 1:
                         await page.wait_for_timeout(1000)
@@ -1679,11 +1855,12 @@ async def main():
             finally:
                 await browser.close()
                 
-        processed_count = len(name_entries) - skipped_count
         print(f"\n🎉 Processing complete:")
         print(f"   ✅ Updated: {updated_count}")
         print(f"   ⏭️  Skipped (already processed): {skipped_count}")
-        print(f"   📊 Total processed: {processed_count}/{len(name_entries)}")
+        print(f"   📊 Total rows examined: {processed_count}")
+        if args.row_limit:
+            print(f"   🔢 Row limit applied: {args.row_limit}")
         return
     
     # Standard command line mode
@@ -1710,13 +1887,21 @@ async def main():
                 
                 # Group fields by category for better readability
                 categories = {
-                    'Personal': ['first_name', 'middle_name', 'last_name', 'suffix', 'gender', 'birthday', 'age'],
-                    'Contact': ['email', 'home_phone', 'work_phone', 'cell_phone', 'fax'],
-                    'Address': ['address', 'apartment', 'city', 'state', 'zip', 'county', 'neighborhood'],
-                    'Voter Info': ['voter_id', 'registration_date', 'voter_status', 'party_affiliation', 'precinct'],
-                    'Districts': ['district_congress', 'district_state_house', 'district_state_senate', 'district_judicial', 'district_school', 'district_city', 'district_county'],
-                    'History': ['primary_votes', 'general_votes', 'vote_history'],
-                    'Additional': ['employer', 'occupation', 'spouse_name', 'notes']
+                    'Personal': ['first_name', 'middle_name', 'last_name', 'birthday', 'age', 'gender'],
+                    'Contact': ['mobile_phone', 'mobile_phone_reliability', 'landline_phone', 'landline_phone_reliability', 
+                               'primary_address', 'secondary_address', 'facebook', 'instagram', 'twitter'],
+                    'Voter Info': ['registration_status', 'registration_date', 'last_activity_date', 
+                                  'official_party', 'observed_party', 'calculated_party', 'absentee_status'],
+                    'Ethnicity': ['state_reported_ethnicity', 'modeled_ethnicity', 'observed_ethnicity'],
+                    'Identification': ['gopdc_voter_key', 'rnc_client_id', 'state_voter_id', 
+                                      'jurisdictional_voter_id', 'rnc_registration_id'],
+                    'Districts': ['congressional_district', 'senate_district', 'legislative_district', 
+                                 'jurisdiction', 'precinct', 'precinct_number', 'custom_districts'],
+                    'Vote History': ['early_vote_date', 'vote_history'],
+                    'Voter Frequency': ['overall_frequency', 'general_frequency', 'primary_frequency', 
+                                       'voter_regularity_general', 'voter_regularity_primary'],
+                    'Geographic': ['dma', 'census_block', 'turf'],
+                    'Additional': ['tags', 'notes']
                 }
                 
                 for category, fields in categories.items():
